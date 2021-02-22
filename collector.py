@@ -27,8 +27,9 @@ class Collector:
         })
 
     def readDataFromFile(self, channelName):
+        sanitizedChannelName = sanitize_filename(channelName)
         try:
-            with open(path.join(_filePath, f"{_FileNamePrefix + channelName}.json"), 'r') as f:
+            with open(path.join(_filePath, f"{_FileNamePrefix + sanitizedChannelName}.json"), 'r') as f:
                 jsonData = json.loads(f.read())
                 return jsonData
         except FileNotFoundError:
@@ -47,8 +48,8 @@ class Collector:
                 "twoColumnSearchResultsRenderer"][
                 "primaryContents"][
                 "sectionListRenderer"]["contents"][0]["itemSectionRenderer"]["contents"]
-            with open("test.json", 'w') as f:
-                json.dump(results, f, indent=4, ensure_ascii=False)
+            # with open("test.json", 'w') as f:
+            #     json.dump(results, f, indent=4, ensure_ascii=False)
             #look for channel ID in results
             channelDetails = None
             for result in results:
@@ -127,8 +128,8 @@ class Collector:
         try:
             initialVideoPage = self.session.get(
                 f"https://www.youtube.com/channel/{channelID}/videos").text
-            with open("test.html", 'w') as f:
-                f.write(initialVideoPage)
+            # with open("test.html", 'w') as f:
+            #     f.write(initialVideoPage)
             initialRequestDataJson = json.loads(
                 '{' + initialVideoPage.split("ytcfg.set({")[1].split(");var setMessage")[0])
         except Exception as e:
@@ -216,7 +217,8 @@ class Collector:
         print("getting new data... be patient")
         newdata = self.getVideos(channelID)
         change = False
-        with open(path.join(_filePath, f"{_ReportFilePrefix + channelName}.chagelog"), 'a') as f:
+        sanitizedChannelName = sanitize_filename(channelName)
+        with open(path.join(_filePath, f"{_ReportFilePrefix + sanitizedChannelName}.chagelog"), 'a') as f:
             f.write(
                 f"Script run at {datetime.now()}\n===================================================\n")
             for newSubdata in newdata:
