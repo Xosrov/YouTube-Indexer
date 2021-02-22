@@ -12,6 +12,7 @@
 
 **Usage**
 * Run the main collector.py file (pass creators names as arguments)
+    * python3 collector.py -c "youtuber 1" "youtuber 2" "youtuber 3" "and so on"
 * Re-run the script every now and then to detect changes. the changelog and json files are updated after each execution  
 - - - -  
 If you encounter any bugs let me know
