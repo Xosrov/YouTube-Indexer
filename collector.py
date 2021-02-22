@@ -113,9 +113,14 @@ class Collector:
         print("Gotten initial video list")
         try:
             #data and params for subsequent json requests
+            continuation = re.search(self.initialContinuationToken, initialVideoPage)
+            #no more videos
+            if not continuation:
+                print("No more videos detected")
+                return channelName, videoData
+            continuation = continuation.group(1)
             hl, gl = re.search(self.languageParams, initialVideoPage).groups()
             tokenParam, visitorData, clientName, clientVer = re.search(self.clientData, initialVideoPage).groups()
-            continuation = re.search(self.initialContinuationToken, initialVideoPage).group(1)
         except Exception as e:
             print(e)
             print("Invalid output for tokens, YouTube might have changed page layout.\nask me to update the code")
