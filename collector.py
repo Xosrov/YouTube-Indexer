@@ -1,24 +1,37 @@
 #collect a list of all youtube videos for a channel, allowing you to detect when a video gets unlisted/removed
+from sqlite3.dbapi2 import Cursor
 import requests
 import json
 from os import path
 from datetime import datetime
 from time import sleep
 import argparse
+import sqlite3
 #validate file names
 from pathvalidate import sanitize_filename
-_filePath = path.dirname(path.abspath(__file__))
-_FileNamePrefix = "VE_"  # video data
-_ReportFilePrefix = "RE_"  # changelog data
+_SupportedDatabases = {"sqlite", "json"}
+_ScriptPath = path.dirname(path.abspath(__file__))
+_SqliteSchemaFileLocation = path.join(_ScriptPath, "schema.sql")
+
 #TODOS:
-    #not accounting for possible captcha appearings or request limiting that might be enforced on IP
-    #video upload dates not stored. tried my best to keep them organized by dates but some changes bring older videos to top
-    #better exception handling needed. changes might be lost for long sessions if something wrong happens
-    #improve readability
+#not accounting for possible captcha appearings or request limiting that might be enforced on IP
+#video upload dates not stored. tried my best to keep them organized by dates but some changes bring older videos to top
+#better exception handling needed. changes might be lost for long sessions if something wrong happens
+#improve readability
 
 
 class Collector:
-    def __init__(self, userAgent="Mozilla/5.0 (Windows NT 6.1; rv:60.0) Gecko/20100101 Firefox/60.0"):
+    def __init__(self, databaseType: str, databaseLocation: str, userAgent: str, minVerbosityPriority: int):
+        assert databaseType in _SupportedDatabases, f"Supported database types are {_SupportedDatabases}"
+        assert path.exists(databaseLocation), "Database location doesn't exist"
+        self._JsonDatabaseBaseFilesPath = path.join(
+            databaseLocation, "VE_")  # json video data
+        self._ChangelogBaseFilesPath = path.join(
+            databaseLocation, "RE_")  # changelog data
+        self._SQLDatabaseBaseFilePath = path.join(
+            databaseLocation, "all_data")  # sqlite video data
+        self.databaseType = databaseType
+        self.minVerbosityPriority = minVerbosityPriority
         self.session = requests.Session()
         #base header
         self.userAgent = userAgent
@@ -26,18 +39,134 @@ class Collector:
             "user-agent": userAgent
         })
 
-    def readDataFromFile(self, channelName):
-        sanitizedChannelName = sanitize_filename(channelName)
-        try:
-            with open(path.join(_filePath, f"{_FileNamePrefix + sanitizedChannelName}.json"), 'r') as f:
-                jsonData = json.loads(f.read())
-                return jsonData
-        except FileNotFoundError:
-            return None
-        except json.decoder.JSONDecodeError:
-            return None
+    def print(self, verbosityPriority: int, object):
+        if verbosityPriority <= self.minVerbosityPriority:
+            print(object)
 
-    def searchForChannelName(self, name):
+    def convertJSONtoSQLite(self, name: str):
+        result = self.searchForChannelName(name)
+        if not result:
+            self.print(1, f"No channel by such name, ignoring for {name}")
+            return None
+        channelName, channelID = result
+        data = None
+        if path.exists(self._SQLDatabaseBaseFilePath + ".sqlite"):
+            self.print(
+                1, f"Database file at {str(self._SQLDatabaseBaseFilePath) + '.sqlite'} already exists. appending that data too to prevent losses..")
+            self.databaseType = "sqlite"
+            data = self.readBasicDataFromDB(channelName, channelID)
+        #set dtype as json first
+        self.databaseType = "json"
+        #previous sql data exists. append new data to prevent loss
+        if data:
+            jsonData = self.readBasicDataFromDB(channelName, channelID)
+            #append json data to sqlite data
+            for jEach in jsonData:
+                append = True
+                for sEach in data:
+                    #unique element already exists in sql data
+                    if jEach["Link"] == sEach["Link"]:
+                        append = False
+                        break
+                if append:
+                    self.print(1, f"Appending video '{jEach['Title']}' to new data, as it wasn't there before")
+                    data.append(jEach)
+        else:
+            data = self.readBasicDataFromDB(channelName, channelID)
+        if not data:
+            self.print(
+                2, f"No valid database for channel, ignoring for {channelName}")
+            return None
+        self.print(2, f"Converting to SQL for {channelName}")
+        #set dtype as sql for saving
+        self.databaseType = "sqlite"
+        self.writeBasicDataToDB(channelName, channelID, data)
+
+    def runSqlSchema(self, SqlCursor: sqlite3.Cursor):
+        """
+            Make sure database exists
+        """
+        self.print(
+            3, f"Making sure SQLite is correct format, running schema.sql commands")
+        with open(_SqliteSchemaFileLocation, 'r') as f:
+            commands = f.read()
+            SqlCursor.executescript(commands)
+
+    def readBasicDataFromDB(self, channelName: str, channelID: str):
+        sanitizedChannelName = str(sanitize_filename(channelName))
+        if self.databaseType == "json":
+            self.print(3, f"Try to read Json for {channelName}")
+            try:
+                with open(f"{self._JsonDatabaseBaseFilesPath + sanitizedChannelName}.json", 'r') as f:
+                    videoData = json.loads(f.read())
+                    return videoData
+            except FileNotFoundError:
+                self.print(3, f"Json file not found for {channelName}")
+                return None
+            except json.decoder.JSONDecodeError:
+                self.print(3, f"Error decoding Json for {channelName}")
+                return None
+        elif self.databaseType == "sqlite":
+            self.print(3, "Connecting to SQL database")
+            conn = sqlite3.connect(self._SQLDatabaseBaseFilePath + ".sqlite")
+            cursor = conn.cursor()
+            self.runSqlSchema(cursor)
+            cursor.execute(
+                "SELECT video_title, video_link, video_views, video_duration, video_availability FROM basic_video_data WHERE channel_id = ?", (channelID, ))
+            data = cursor.fetchall()
+            if not data:
+                self.print(3, "SQLite database currently empty")
+                return None
+            videoData = []
+            dataKeys = ["Title", "Link", "Views", "Duration", "Availability"]
+            for dataValues in data:
+                videoData.append(dict(zip(dataKeys, dataValues)))
+            self.print(3, f"Read data from SQLite database")
+            conn.close()
+            return videoData
+
+    def writeBasicDataToDB(self, channelName: str, channelID: str, data: dict):
+        sanitizedChannelName = str(sanitize_filename(channelName))
+        if self.databaseType == "json":
+            self.print(3, f"Dumping to Json for {channelName}")
+            with open(f"{self._JsonDatabaseBaseFilesPath + sanitizedChannelName}.json", 'w') as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        elif self.databaseType == "sqlite":
+            self.print(3, "Connecting to SQLite database")
+            conn = sqlite3.connect(self._SQLDatabaseBaseFilePath + ".sqlite")
+            cursor = conn.cursor()
+            self.runSqlSchema(cursor)
+            #delete previous data
+            cursor.execute(
+                "DELETE FROM channel WHERE channel_id = ?", (channelID, ))
+            #write channel data
+            cursor.execute(
+                "INSERT INTO channel (channel_id, channel_name) VALUES (?, ?)", (channelID, channelName, ))
+            #write video data
+            self.print(3, f"Writing to SQLite for {channelName}")
+            for video in data:
+                try:
+                    videoLink, videoTitle, videoViews, videoDuration, videoAvailability = video.get("Link"), video.get(
+                        "Title"), video.get("Views"), video.get("Duration"), video.get("Availability", 1)
+                    cursor.execute("INSERT INTO basic_video_data (video_title, video_link, video_views, video_duration, video_availability, channel_id) VALUES (?, ?, ?, ?, ?, ?)",
+                                   (videoTitle, videoLink, videoViews, videoDuration, videoAvailability, channelID, ))
+                except sqlite3.IntegrityError as integrityError:
+                    if str(integrityError) == "UNIQUE constraint failed: basic_video_data.video_link":
+                        self.print(
+                            1, f"Video with link {videoLink} already in database, removing old data as links should be unique")
+                        #remove old stuff
+                        cursor.execute(
+                            "DELETE FROM basic_video_data WHERE video_link = ?", (videoLink, ))
+                        #insert current stuff
+                        cursor.execute("INSERT INTO basic_video_data (video_title, video_link, video_views, video_duration, video_availability, channel_id) VALUES (?, ?, ?, ?, ?, ?)",
+                                       (videoTitle, videoLink, videoViews, videoDuration, videoAvailability, channelID, ))
+                        continue
+                    raise integrityError
+            conn.commit()
+            conn.close()
+
+    def searchForChannelName(self, name: str):
+        self.print(3, f"Searching YouTube for {name}")
         searchedPage = self.session.get(
             f"https://www.youtube.com/results?search_query={name}")
         try:
@@ -48,28 +177,33 @@ class Collector:
                 "twoColumnSearchResultsRenderer"][
                 "primaryContents"][
                 "sectionListRenderer"]["contents"][0]["itemSectionRenderer"]["contents"]
+            self.print(4, f"Search results:\n{json.dumps(results)}")
             # with open("test.json", 'w') as f:
             #     json.dump(results, f, indent=4, ensure_ascii=False)
-            #look for channel ID in results
             channelDetails = None
+            #look for channel ID in results
+            #forced to use loop for check because output has no specific order
             for result in results:
                 if "channelRenderer" in result:
                     channelDetails = result["channelRenderer"]
                     break
             if not channelDetails:
                 return None
+            self.print(4, f"Top result details:\n{json.dumps(channelDetails)}")
             channelID = channelDetails["channelId"]
             channelName = channelDetails["title"]["simpleText"]
+            self.print(
+                3, f"Found channel with name '{channelName}', ID '{channelID}'")
             return channelName, channelID
         except Exception as e:
-            print(e)
-            print(
-                "YouTube might have changed site format, contact me to update the code (position 1)")
+            self.print(1, e)
+            self.print(1,
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 1)")
             quit()
     #results is a list
 
-    def recursiveVideosExtraction(self, videoList, postData, postParametes, videoData, current=1):
-        print(f"Getting video list {current}")
+    def recursiveVideosExtraction(self, videoList: list, postData: dict, postParametes: dict, videoData: dict, current: int = 1):
+        self.print(2, f"Getting video list {current}")
         try:
             #these two sometimes dont exist
             views = "NaN"
@@ -79,30 +213,36 @@ class Collector:
             for video in videoList:
                 if "continuationItemRenderer" in video:
                     continuationToken = video["continuationItemRenderer"]["continuationEndpoint"]["continuationCommand"]["token"]
+                    self.print(
+                        3, f"More videos exist, continuation token is {continuationToken}")
                     continue
                 videoID = video["gridVideoRenderer"]["videoId"]
                 title = video["gridVideoRenderer"]["title"]["runs"][0]["text"]
                 try:
                     views = video["gridVideoRenderer"]["viewCountText"]["simpleText"]
                 except:
+                    self.print(3, f"No views in data for {title}, setting NaN")
                     pass
                 try:
                     length = video["gridVideoRenderer"]["thumbnailOverlays"][0]["thumbnailOverlayTimeStatusRenderer"]["text"]["simpleText"]
                 except:
+                    self.print(
+                        3, f"No video length in data for {title}, setting NaN")
                     pass
                 videoData.append(
-                    {"Title": title, "Link": f"https://www.youtube.com/watch?v={videoID}", "Views": views, "Duration": length})
+                    {"Title": title, "Link": f"https://www.youtube.com/watch?v={videoID}", "Views": views, "Duration": length, "Availability": True})
         except Exception as e:
-            print(e)
-            print(
-                "YouTube might have changed site format, contact me to update the code (position 3.1)")
+            self.print(1, e)
+            self.print(1,
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 3.1)")
             quit()
         # if no more exists exit function
         if not continuationToken:
-            print("No more videos exist")
+            self.print(2, "No more videos exist")
             return
         # ask for more videos
         postData["continuation"] = continuationToken
+        self.print(3, "Getting next page")
         videoListPage = self.session.post(
             "https://www.youtube.com/youtubei/v1/browse", headers={}, params=postParametes, data=json.dumps(postData))
         try:
@@ -110,21 +250,15 @@ class Collector:
             nextVideoList = nextJsonData["onResponseReceivedActions"][0][
                 "appendContinuationItemsAction"]["continuationItems"]
         except Exception as e:
-            print(e)
-            print(
-                "YouTube might have changed site format, contact me to update the code (position 3.2)")
+            self.print(1, e)
+            self.print(1,
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 3.2)")
             quit()
         self.recursiveVideosExtraction(
             nextVideoList, postData, postParametes, videoData, current+1)
 
-    def saveToFile(self, channelName, data):
-        #make sure filename is valid
-        sanitizedChannelName = sanitize_filename(channelName)
-        with open(path.join(_filePath, f"{_FileNamePrefix + sanitizedChannelName}.json"), 'w') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
     #get all video data in formatted form, saves to file at script location
-
-    def getVideos(self, channelID):
+    def getVideos(self, channelID: str):
         try:
             initialVideoPage = self.session.get(
                 f"https://www.youtube.com/channel/{channelID}/videos").text
@@ -132,10 +266,12 @@ class Collector:
             #     f.write(initialVideoPage)
             initialRequestDataJson = json.loads(
                 '{' + initialVideoPage.split("ytcfg.set({")[1].split(");var setMessage")[0])
+            self.print(
+                4, f"Initial request json data: \n{json.dumps(initialRequestDataJson)}")
         except Exception as e:
-            print(e)
-            print(
-                "YouTube might have changed site format, contact me to update the code (position 2.1)")
+            self.print(1, e)
+            self.print(1,
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.1)")
             quit()
         # with open("test.json", 'w') as f:
         #     json.dump(requestDataJson, f, indent=4, ensure_ascii=False)
@@ -143,19 +279,20 @@ class Collector:
         # Get post data and parameters
         try:
             APIkey = initialRequestDataJson["INNERTUBE_API_KEY"]
-
             clientData = initialRequestDataJson["INNERTUBE_CONTEXT"]["client"]
             hl = clientData["hl"]
             gl = clientData["gl"]
             visitorData = clientData["visitorData"]
             clientName = clientData["clientName"]
             clientVer = clientData["clientVersion"]
+            self.print(
+                3, f"Post Parameters:\n\tAPI key: {APIkey}\nPost Data:\n\thl: {hl}\n\tgl: {gl}\n\tVisitor data: {visitorData}\n\tClient name: {clientName}\n\tClient ver: {clientVer}")
         except Exception as e:
-            print(e)
-            print(
-                "YouTube might have changed site format, contact me to update the code (position 2.2)")
+            self.print(1, e)
+            self.print(1,
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.2)")
             quit()
-        print("Gotten tokens")
+        self.print(2, "Gotten tokens")
 
         # final video data list
         finalVideoData = []
@@ -169,10 +306,12 @@ class Collector:
                 "tabRenderer"]["content"]["sectionListRenderer"]["contents"][0][
                 "itemSectionRenderer"]["contents"][0][
                 "gridRenderer"]["items"]
+            self.print(
+                4, f"Initial video list:\n{json.dumps(initialVideoList)}")
         except Exception as e:
-            print(e)
-            print(
-                "YouTube might have changed site format, contact me to update the code (position 2.3)")
+            self.print(1, e)
+            self.print(1,
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.3)")
             quit()
 
         # subsequent base post data
@@ -196,29 +335,30 @@ class Collector:
         return finalVideoData
 
     # overrides changes if there are any, use when no initial file exists
-    def getAndSaveVideos(self, channelName, channelID):
+    def getAndSaveVideos(self, channelName: str, channelID: str):
         videoData = self.getVideos(channelID)
-        self.saveToFile(channelName, videoData)
-        print("Done!")
+        self.writeBasicDataToDB(channelName, channelID, videoData)
+        self.print(1, "Done!")
 
-    def detectChanges(self, channelName, AppendNewData=True):
-        print(f"Checking {channelName}")
+    def detectAndSaveChanges(self, channelName: str, AppendNewData: bool = True):
+        self.print(1, f"Checking {channelName}")
         searchResults = self.searchForChannelName(channelName)
         if not searchResults:
-            print("No channel by such name!")
+            self.print(1, "No channel by such name!")
             return False
         channelName, channelID = searchResults
-        print(f"Found {channelName}!")
-        olddata = self.readDataFromFile(channelName)
+        self.print(1, f"Found '{channelName}'")
+        olddata = self.readBasicDataFromDB(channelName, channelID)
         if olddata is None:
-            print("No previous data detected, indexing from scratch")
+            self.print(1, "No previous data detected, indexing from scratch")
             self.getAndSaveVideos(channelName, channelID)
             return True
-        print("getting new data... be patient")
+        self.print(1, "getting new data... be patient")
         newdata = self.getVideos(channelID)
         change = False
-        sanitizedChannelName = sanitize_filename(channelName)
-        with open(path.join(_filePath, f"{_ReportFilePrefix + sanitizedChannelName}.chagelog"), 'a') as f:
+        sanitizedChannelName = str(sanitize_filename(channelName))
+        with open(f"{self._ChangelogBaseFilesPath + sanitizedChannelName}.chagelog", 'a') as f:
+            self.print(3, "Writing changelogs")
             f.write(
                 f"Script run at {datetime.now()}\n===================================================\n")
             for newSubdata in newdata:
@@ -228,28 +368,28 @@ class Collector:
                         #check views:
                         if oldSubdata["Views"] != newSubdata["Views"]:
                             change = True
-                            print(
-                                f"Views for video '{oldSubdata['Title']}' changed!")
+                            self.print(2,
+                                       f"Views for video '{oldSubdata['Title']}' changed!")
                             f.write(
                                 f"Views have changed :\n    Title: {oldSubdata['Title']}\n    Link: {newSubdata['Link']}\n    Old view count: {oldSubdata['Views']} \n    New view count: {newSubdata['Views']}\n")
                         #check if Duration has changed
                         if (oldSubdata["Duration"] != newSubdata["Duration"]):
                             change = True
-                            print(
-                                f"Duration for video '{oldSubdata['Title']}' has changed!")
+                            self.print(2,
+                                       f"Duration for video '{oldSubdata['Title']}' has changed!")
                             f.write(
                                 f"Duration for video changed:\n    Title: {oldSubdata['Title']}\n    Link: {newSubdata['Link']}\n    Old Duration: {oldSubdata['Duration']} \n    New Duration: {newSubdata['Duration']}\n")
                         #check if Title has changed
                         if (oldSubdata["Title"] != newSubdata["Title"]):
                             change = True
-                            print(
-                                f"Title for video '{oldSubdata['Title']}' has changed!")
+                            self.print(2,
+                                       f"Title for video '{oldSubdata['Title']}' has changed!")
                             f.write(
                                 f"Title for video changed:\n    Old Title: {oldSubdata['Title']}\n    Link: {newSubdata['Link']}\n    New Title: {newSubdata['Title']} \n")
                         exists = True
                 if not exists:
                     change = True
-                    print(f"Newly added: '{newSubdata['Title']}'")
+                    self.print(1, f"Newly added: '{newSubdata['Title']}'")
                     f.write(
                         f"Newly Added:\n    Title: {newSubdata['Title']}\n    Link: {newSubdata['Link']}\n    Views: {newSubdata['Views']} \n    Duration: {newSubdata['Duration']}\n")
             for oldSubdata in olddata:
@@ -258,19 +398,22 @@ class Collector:
                     if (newSubdata["Link"] == oldSubdata["Link"]):
                         exists = True
                         break
+                oldSubdata["Availability"] = True
                 if not exists:
                     change = True
-                    print(
-                        f"Video '{oldSubdata['Title']}' Has been removed or unlisted! Still keeping in data though")
+                    oldSubdata["Availability"] = False
+                    self.print(2,
+                               f"Video '{oldSubdata['Title']}' Has been removed or unlisted! Still keeping in data though")
                     f.write(
                         f"Removed or Unlisted:\n    Title: {oldSubdata['Title']}\n    Link: {oldSubdata['Link']}\n    Views: {oldSubdata['Views']} \n    Duration: {oldSubdata['Duration']}\n")
+
             if not change:
-                print("No changes detected.")
+                self.print(1, "No changes detected.")
                 f.write("No changes detected\n")
         if change:
             #update olddata, then save to file
             if AppendNewData:
-                print("Appending changes..")
+                self.print(1, "Appending changes..")
                 index = 0
                 for newSubdata in newdata:
                     add = True
@@ -287,19 +430,46 @@ class Collector:
                         # preserve by-date order
                         olddata.insert(index, newSubdata)
                     index += 1
-                self.saveToFile(channelName, olddata)
-        print("Done!")
+                self.writeBasicDataToDB(channelName, channelID, olddata)
+        self.print(1, "Done!")
         return True
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    inputGroup = parser.add_mutually_exclusive_group(required=True)
+    inputGroup.add_argument(
+        "-c", "--creators", help="Creator names to index (use quatation marks for multi-worded names)", nargs='*')
+    inputGroup.add_argument(
+        "-i", "--input-file", help="Input channel names from file (newline-separated names required)")
     parser.add_argument(
-        "-c", "--creators", help="Creator names to index (remember to escape spaces in multi-worded names)", required=True, nargs='*')
+        "-cts", "--convert-json-to-sqlite", help="Converts Json databases to SQLite format. Saves in the same location as json files", action='store_true')
+    parser.add_argument(
+        '-f', "--format", help=f"Database storage format. defaults to SQLite", choices=_SupportedDatabases, default="sqlite")
+    parser.add_argument(
+        '-l', "--location", help="Database location relative to script's path", default=_ScriptPath)
+    parser.add_argument(
+        '-ua', "--user-agent", help="User-Agent to use when connecting to YouTube", default="Mozilla/5.0 (Windows NT 6.1; rv:60.0) Gecko/20100101 Firefox/60.0")
+    parser.add_argument(
+        '-v', "--verbosity", help="Set verbosity from 0-3. (0 for silent, default is 1)", type=int, default=1)
     args = parser.parse_args()
-    sample = Collector()
-    print("DONT INTERRUPT THE PROCESS, CHANGES WONT BE SAVED PROPERLY!")
+
+    creators = []
+    if args.creators:
+        creators = args.creators
+    elif args.input_file:
+        assert path.exists(
+            args.input_file), "Input file location doesn't exist"
+        with open(args.input_file, 'r') as f:
+            for line in f:
+                creators.append(line.strip())
+
+    sample = Collector(args.format, args.location,
+                       args.user_agent, args.verbosity)
     sleep(2)
-    for creator in args.creators:
-        sample.detectChanges(creator)
-            
+    if args.convert_json_to_sqlite:
+        for creator in creators:
+            sample.convertJSONtoSQLite(creator)
+    else:
+        for creator in creators:
+            sample.detectAndSaveChanges(creator)
