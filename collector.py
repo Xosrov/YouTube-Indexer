@@ -38,7 +38,18 @@ class Collector:
         self.session.headers.update({
             "user-agent": userAgent
         })
-
+        # consent to youtube
+        firstVisit = self.session.get("https://youtube.com")
+        if "consent.youtube.com" in firstVisit.url:
+            print("Consenting to YouTube")
+            data = {}
+            for i in firstVisit.text.split('<input type="hidden" ')[1:]:
+                params = i.split('</form>')[0]
+                name = params.split('name="')[1].split('"')[0]
+                value = params.split('value="')[1].split('"')[0]
+                data[name] = value
+            self.session.post("https://consent.youtube.com/s", data=data)
+            print("Done")
     def print(self, verbosityPriority: int, object):
         if verbosityPriority <= self.minVerbosityPriority:
             print(object)
@@ -170,6 +181,8 @@ class Collector:
         searchedPage = self.session.get(
             f"https://www.youtube.com/results?search_query={name}")
         try:
+            # with open("searchpage.html", 'w') as f:
+                # f.write(searchedPage.text)
             initialDataJson = json.loads(searchedPage.text.split(
                 'ytInitialData = ')[1].split(';</script>')[0])
             results = initialDataJson[
