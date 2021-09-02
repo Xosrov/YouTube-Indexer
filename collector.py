@@ -1,5 +1,4 @@
 #collect a list of all youtube videos for a channel, allowing you to detect when a video gets unlisted/removed
-from sqlite3.dbapi2 import Cursor
 import requests
 import json
 from os import path
@@ -7,6 +6,8 @@ from datetime import datetime
 from time import sleep
 import argparse
 import sqlite3
+import base64
+
 #validate file names
 from pathvalidate import sanitize_filename
 _SupportedDatabases = {"sqlite", "json"}
@@ -38,18 +39,39 @@ class Collector:
         self.session.headers.update({
             "user-agent": userAgent
         })
+        self.consent()
+    
+    def consent(self): #run once at start of bot
+        self.print(1, 'Consenting to YouTube...')
         # consent to youtube
-        firstVisit = self.session.get("https://youtube.com")
-        if "consent.youtube.com" in firstVisit.url:
-            print("Consenting to YouTube")
-            data = {}
-            for i in firstVisit.text.split('<input type="hidden" ')[1:]:
-                params = i.split('</form>')[0]
-                name = params.split('name="')[1].split('"')[0]
-                value = params.split('value="')[1].split('"')[0]
-                data[name] = value
-            self.session.post("https://consent.youtube.com/s", data=data)
-            print("Done")
+        firstVisit = self.session.get("https://youtube.com").text
+        # with open("test.html", 'w') as f:
+        #         f.write(firstVisit.text)
+        page_data_a = json.loads(
+                '{' + firstVisit.split("ytcfg.set({")[1].split(");var setMessage")[0])
+        page_data_b = json.loads(
+                '{' + firstVisit.split("ytInitialData = {")[1].split(";</script>")[0])
+        # with open('test1.json', 'w') as f:
+        #     json.dump(page_data_a, f, indent=4)
+        # with open('test2.json', 'w') as f:
+        #     json.dump(page_data_b, f, indent=4)
+        # upgrade cookies
+        consent_cookie_data = page_data_b['topbar']['desktopTopbarRenderer']['interstitial'][
+            'consentBumpV2Renderer']['agreeButton']['buttonRenderer']['command']['saveConsentAction']
+        self.session.cookies.pop('CONSENT')
+        self.session.cookies.update({
+            'CONSENT': consent_cookie_data['consentCookie'],
+            'VISITOR_INFO1_LIVE': consent_cookie_data['visitorCookie'],
+            'PREF': ''
+        })
+        data = {
+            'visitor_data': base64.b64encode(bytes(page_data_a['DATASYNC_ID'], 'utf-8')).decode('utf-8'),
+            'session_token': page_data_a['XSRF_TOKEN']
+        }
+        self.session.post("https://www.youtube.com/upgrade_visitor_cookie", data=data)
+        # consent
+        self.session.get(consent_cookie_data['consentSaveUrl'])
+
     def print(self, verbosityPriority: int, object):
         if verbosityPriority <= self.minVerbosityPriority:
             print(object)
@@ -275,8 +297,8 @@ class Collector:
         try:
             initialVideoPage = self.session.get(
                 f"https://www.youtube.com/channel/{channelID}/videos").text
-            # with open("test.html", 'w') as f:
-            #     f.write(initialVideoPage)
+            with open("test.html", 'w') as f:
+                f.write(initialVideoPage)
             initialRequestDataJson = json.loads(
                 '{' + initialVideoPage.split("ytcfg.set({")[1].split(");var setMessage")[0])
             self.print(
