@@ -3,3 +3,4 @@ RE_*
 test.*
 error.*
 Data/
+error_log*

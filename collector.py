@@ -7,6 +7,7 @@ from time import sleep
 import argparse
 import sqlite3
 import base64
+import traceback
 
 #validate file names
 from pathvalidate import sanitize_filename
@@ -17,7 +18,7 @@ _SqliteSchemaFileLocation = path.join(_ScriptPath, "schema.sql")
 #TODOS:
 #not accounting for possible captcha appearings or request limiting that might be enforced on IP
 #video upload dates not stored. tried my best to keep them organized by dates but some changes bring older videos to top
-#better exception handling needed. changes might be lost for long sessions if something wrong happens
+#better exception handling needed. changes might be lost for long sessions if something wrong happens(added basic error logging for now)
 #improve readability
 
 
@@ -40,16 +41,16 @@ class Collector:
             "user-agent": userAgent
         })
         self.consent()
-    
-    def consent(self): #run once at start of bot
+
+    def consent(self):  # run once at start of bot
+        self.print(1, 'Consenting to YouTube...')
+        firstVisit = self.session.get("https://youtube.com").text
         try:
-            self.print(1, 'Consenting to YouTube...')
             # consent to youtube
-            firstVisit = self.session.get("https://youtube.com").text
             page_data_a = json.loads(
-                    '{' + firstVisit.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
+                '{' + firstVisit.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
             page_data_b = json.loads(
-                    '{' + firstVisit.split("ytInitialData = {")[1].split(";</script>")[0])
+                '{' + firstVisit.split("ytInitialData = {")[1].split(";</script>")[0])
             # upgrade cookies
             consent_cookie_data = page_data_b['topbar']['desktopTopbarRenderer']['interstitial'][
                 'consentBumpV2Renderer']['agreeButton']['buttonRenderer']['command']['saveConsentAction']
@@ -63,18 +64,27 @@ class Collector:
                 'visitor_data': base64.b64encode(bytes(page_data_a['DATASYNC_ID'], 'utf-8')).decode('utf-8'),
                 'session_token': page_data_a['XSRF_TOKEN']
             }
-            self.session.post("https://www.youtube.com/upgrade_visitor_cookie", data=data)
+            self.session.post(
+                "https://www.youtube.com/upgrade_visitor_cookie", data=data)
             # consent
             self.session.get(consent_cookie_data['consentSaveUrl'])
         except Exception as e:
             self.print(1, e)
             self.print(1,
-                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.0)")
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 0)\nCheck logs for more info")
+            detailed_error = traceback.format_exc()
+            self.log_to_file("Error occured in Position 0, here is detailed traceback:\n\n{}\n\nHere is page content after first visit:\n\n{}".format(
+                detailed_error, firstVisit))
             quit()
 
     def print(self, verbosityPriority: int, object):
         if verbosityPriority <= self.minVerbosityPriority:
             print(object)
+
+    def log_to_file(self, data):
+        logname = datetime.now().strftime("error_log_%H_%M_%d_%m_%Y.log")
+        with open(path.join(_ScriptPath, logname), 'w') as f:
+            f.write(data)
 
     def convertJSONtoSQLite(self, name: str):
         result = self.searchForChannelName(name)
@@ -102,7 +112,8 @@ class Collector:
                         append = False
                         break
                 if append:
-                    self.print(1, f"Appending video '{jEach['Title']}' to new data, as it wasn't there before")
+                    self.print(
+                        1, f"Appending video '{jEach['Title']}' to new data, as it wasn't there before")
                     data.append(jEach)
         else:
             data = self.readBasicDataFromDB(channelName, channelID)
@@ -120,7 +131,7 @@ class Collector:
             Make sure database exists
         """
         self.print(
-            3, f"Making sure SQLite is correct format, running schema.sql commands")
+            3, "Making sure SQLite is correct format, running schema.sql commands")
         with open(_SqliteSchemaFileLocation, 'r') as f:
             commands = f.read()
             SqlCursor.executescript(commands)
@@ -229,7 +240,10 @@ class Collector:
         except Exception as e:
             self.print(1, e)
             self.print(1,
-                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 1)")
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 1)\nCheck logs for more info")
+            detailed_error = traceback.format_exc()
+            self.log_to_file("Error occured in Position 1, here is detailed traceback:\n\n{}\n\nHere is page content after initial channel name search:\n\n{}".format(
+                detailed_error, searchedPage))
             quit()
     #results is a list
 
@@ -265,7 +279,10 @@ class Collector:
         except Exception as e:
             self.print(1, e)
             self.print(1,
-                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 3.1)")
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 3.1)\nCheck logs for more info")
+            detailed_error = traceback.format_exc()
+            self.log_to_file("Error occured in Position 3.1, here is detailed traceback:\n\n{}\n\nVideo list:\n\n{}\n\nVideo data:\n\n{}".format(
+                detailed_error, json.dumps(videoList), json.dumps(videoData)))
             quit()
         # if no more exists exit function
         if not continuationToken:
@@ -275,26 +292,27 @@ class Collector:
         postData["continuation"] = continuationToken
         self.print(3, "Getting next page")
         videoListPage = self.session.post(
-            "https://www.youtube.com/youtubei/v1/browse", headers={}, params=postParametes, data=json.dumps(postData))
+            "https://www.youtube.com/youtubei/v1/browse", headers={}, params=postParametes, data=json.dumps(postData)).text
         try:
-            nextJsonData = json.loads(videoListPage.text)
+            nextJsonData = json.loads(videoListPage)
             nextVideoList = nextJsonData["onResponseReceivedActions"][0][
                 "appendContinuationItemsAction"]["continuationItems"]
         except Exception as e:
             self.print(1, e)
             self.print(1,
-                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 3.2)")
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 3.2)\nCheck logs for more info")
+            detailed_error = traceback.format_exc()
+            self.log_to_file("Error occured in Position 3.2, here is detailed traceback:\n\n{}\n\nHere is video list page content:\n\n{}".format(
+                detailed_error, videoListPage))
             quit()
         self.recursiveVideosExtraction(
             nextVideoList, postData, postParametes, videoData, current+1)
 
     #get all video data in formatted form, saves to file at script location
     def getVideos(self, channelID: str):
+        initialVideoPage = self.session.get(
+            f"https://www.youtube.com/channel/{channelID}/videos").text
         try:
-            initialVideoPage = self.session.get(
-                f"https://www.youtube.com/channel/{channelID}/videos").text
-            with open("test.html", 'w') as f:
-                f.write(initialVideoPage)
             initialRequestDataJson = json.loads(
                 '{' + initialVideoPage.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
             self.print(
@@ -302,7 +320,10 @@ class Collector:
         except Exception as e:
             self.print(1, e)
             self.print(1,
-                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.1)")
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.1)\nCheck logs for more info")
+            detailed_error = traceback.format_exc()
+            self.log_to_file("Error occured in Position 2.1, here is detailed traceback:\n\n{}\n\nHere is the initial get videos page content:\n\n{}".format(
+                detailed_error, initialVideoPage))
             quit()
         # Get post data and parameters
         try:
@@ -318,7 +339,10 @@ class Collector:
         except Exception as e:
             self.print(1, e)
             self.print(1,
-                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.2)")
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.2)\nCheck logs for more info")
+            detailed_error = traceback.format_exc()
+            self.log_to_file("Error occured in Position 2.2, here is detailed traceback:\n\n{}\n\nHere is the initial get videos page content:\n\n{}".format(
+                detailed_error, initialVideoPage))
             quit()
         self.print(2, "Gotten tokens")
 
@@ -339,7 +363,10 @@ class Collector:
         except Exception as e:
             self.print(1, e)
             self.print(1,
-                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.3)")
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.3)\nCheck logs for more info")
+            detailed_error = traceback.format_exc()
+            self.log_to_file("Error occured in Position 2.3, here is detailed traceback:\n\n{}\n\nHere is the initial get videos page content:\n\n{}".format(
+                detailed_error, initialVideoPage))
             quit()
 
         # subsequent base post data
