@@ -42,35 +42,35 @@ class Collector:
         self.consent()
     
     def consent(self): #run once at start of bot
-        self.print(1, 'Consenting to YouTube...')
-        # consent to youtube
-        firstVisit = self.session.get("https://youtube.com").text
-        # with open("test.html", 'w') as f:
-        #         f.write(firstVisit.text)
-        page_data_a = json.loads(
-                '{' + firstVisit.split("ytcfg.set({")[1].split(");var setMessage")[0])
-        page_data_b = json.loads(
-                '{' + firstVisit.split("ytInitialData = {")[1].split(";</script>")[0])
-        # with open('test1.json', 'w') as f:
-        #     json.dump(page_data_a, f, indent=4)
-        # with open('test2.json', 'w') as f:
-        #     json.dump(page_data_b, f, indent=4)
-        # upgrade cookies
-        consent_cookie_data = page_data_b['topbar']['desktopTopbarRenderer']['interstitial'][
-            'consentBumpV2Renderer']['agreeButton']['buttonRenderer']['command']['saveConsentAction']
-        self.session.cookies.pop('CONSENT')
-        self.session.cookies.update({
-            'CONSENT': consent_cookie_data['consentCookie'],
-            'VISITOR_INFO1_LIVE': consent_cookie_data['visitorCookie'],
-            'PREF': ''
-        })
-        data = {
-            'visitor_data': base64.b64encode(bytes(page_data_a['DATASYNC_ID'], 'utf-8')).decode('utf-8'),
-            'session_token': page_data_a['XSRF_TOKEN']
-        }
-        self.session.post("https://www.youtube.com/upgrade_visitor_cookie", data=data)
-        # consent
-        self.session.get(consent_cookie_data['consentSaveUrl'])
+        try:
+            self.print(1, 'Consenting to YouTube...')
+            # consent to youtube
+            firstVisit = self.session.get("https://youtube.com").text
+            page_data_a = json.loads(
+                    '{' + firstVisit.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
+            page_data_b = json.loads(
+                    '{' + firstVisit.split("ytInitialData = {")[1].split(";</script>")[0])
+            # upgrade cookies
+            consent_cookie_data = page_data_b['topbar']['desktopTopbarRenderer']['interstitial'][
+                'consentBumpV2Renderer']['agreeButton']['buttonRenderer']['command']['saveConsentAction']
+            self.session.cookies.pop('CONSENT')
+            self.session.cookies.update({
+                'CONSENT': consent_cookie_data['consentCookie'],
+                'VISITOR_INFO1_LIVE': consent_cookie_data['visitorCookie'],
+                'PREF': ''
+            })
+            data = {
+                'visitor_data': base64.b64encode(bytes(page_data_a['DATASYNC_ID'], 'utf-8')).decode('utf-8'),
+                'session_token': page_data_a['XSRF_TOKEN']
+            }
+            self.session.post("https://www.youtube.com/upgrade_visitor_cookie", data=data)
+            # consent
+            self.session.get(consent_cookie_data['consentSaveUrl'])
+        except Exception as e:
+            self.print(1, e)
+            self.print(1,
+                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.0)")
+            quit()
 
     def print(self, verbosityPriority: int, object):
         if verbosityPriority <= self.minVerbosityPriority:
@@ -203,8 +203,6 @@ class Collector:
         searchedPage = self.session.get(
             f"https://www.youtube.com/results?search_query={name}")
         try:
-            # with open("searchpage.html", 'w') as f:
-                # f.write(searchedPage.text)
             initialDataJson = json.loads(searchedPage.text.split(
                 'ytInitialData = ')[1].split(';</script>')[0])
             results = initialDataJson[
@@ -213,8 +211,6 @@ class Collector:
                 "primaryContents"][
                 "sectionListRenderer"]["contents"][0]["itemSectionRenderer"]["contents"]
             self.print(4, f"Search results:\n{json.dumps(results)}")
-            # with open("test.json", 'w') as f:
-            #     json.dump(results, f, indent=4, ensure_ascii=False)
             channelDetails = None
             #look for channel ID in results
             #forced to use loop for check because output has no specific order
@@ -300,7 +296,7 @@ class Collector:
             with open("test.html", 'w') as f:
                 f.write(initialVideoPage)
             initialRequestDataJson = json.loads(
-                '{' + initialVideoPage.split("ytcfg.set({")[1].split(");var setMessage")[0])
+                '{' + initialVideoPage.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
             self.print(
                 4, f"Initial request json data: \n{json.dumps(initialRequestDataJson)}")
         except Exception as e:
@@ -308,9 +304,6 @@ class Collector:
             self.print(1,
                        "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.1)")
             quit()
-        # with open("test.json", 'w') as f:
-        #     json.dump(requestDataJson, f, indent=4, ensure_ascii=False)
-
         # Get post data and parameters
         try:
             APIkey = initialRequestDataJson["INNERTUBE_API_KEY"]
