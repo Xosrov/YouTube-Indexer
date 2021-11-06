@@ -44,47 +44,62 @@ class Collector:
 
     def consent(self):  # run once at start of bot
         self.print(1, 'Consenting to YouTube...')
-        firstVisit = self.session.get("https://youtube.com").text
-        try:
-            # consent to youtube
-            page_data_a = json.loads(
-                '{' + firstVisit.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
-            page_data_b = json.loads(
-                '{' + firstVisit.split("ytInitialData = {")[1].split(";</script>")[0])
-            # upgrade cookies
-            consent_cookie_data = page_data_b['topbar']['desktopTopbarRenderer']['interstitial'][
-                'consentBumpV2Renderer']['agreeButton']['buttonRenderer']['command']['saveConsentAction']
-            self.session.cookies.pop('CONSENT')
-            self.session.cookies.update({
-                'CONSENT': consent_cookie_data['consentCookie'],
-                'VISITOR_INFO1_LIVE': consent_cookie_data['visitorCookie'],
-                'PREF': ''
-            })
-            data = {
-                'visitor_data': base64.b64encode(bytes(page_data_a['DATASYNC_ID'], 'utf-8')).decode('utf-8'),
-                'session_token': page_data_a['XSRF_TOKEN']
-            }
-            self.session.post(
-                "https://www.youtube.com/upgrade_visitor_cookie", data=data)
-            # consent
-            self.session.get(consent_cookie_data['consentSaveUrl'])
-        except Exception as e:
-            self.print(1, e)
-            self.print(1,
-                       "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 0)\nCheck logs for more info")
-            detailed_error = traceback.format_exc()
-            self.log_to_file("Error occured in Position 0, here is detailed traceback:\n\n{}\n\nHere is page content after first visit:\n\n{}".format(
-                detailed_error, firstVisit))
-            quit()
+        firstVisit = self.session.get("https://youtube.com")
+        # Check if consent needed
+        consent_cookie = self.session.cookies.get("CONSENT", "")
+        if "PENDING" in consent_cookie:
+            try:
+                # consent to youtube
+                page_data_a = json.loads(
+                    '{' + firstVisit.text.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
+                page_data_b = json.loads(
+                    '{' + firstVisit.text.split("ytInitialData = {")[1].split(";</script>")[0])
+                # upgrade cookies
+                consent_cookie_data = page_data_b['topbar']['desktopTopbarRenderer']['interstitial'][
+                    'consentBumpV2Renderer']['agreeButton']['buttonRenderer']['command']['saveConsentAction']
+                self.session.cookies.pop('CONSENT')
+                self.session.cookies.update({
+                    'CONSENT': consent_cookie_data['consentCookie'],
+                    'VISITOR_INFO1_LIVE': consent_cookie_data['visitorCookie'],
+                    'PREF': ''
+                })
+                data = {
+                    'visitor_data': base64.b64encode(bytes(page_data_a['DATASYNC_ID'], 'utf-8')).decode('utf-8'),
+                    'session_token': page_data_a['XSRF_TOKEN']
+                }
+                self.session.post(
+                    "https://www.youtube.com/upgrade_visitor_cookie", data=data)
+                # consent
+                self.session.get(consent_cookie_data['consentSaveUrl'])
+            except Exception as e:
+                self.print(1, e)
+                self.print(1,
+                           "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 0)\nCheck logs for more info")
+                detailed_error = traceback.format_exc()
+                self.log_to_file("Error occured in Position 0, here is detailed traceback:\n\n{}\n\nHere are initial page details after first visit: {}\n\n".format(
+                    detailed_error, self.get_request_log(firstVisit)))
+                quit()
+        else:
+            self.print(1, "It seems consent is not required")
 
     def print(self, verbosityPriority: int, object):
         if verbosityPriority <= self.minVerbosityPriority:
             print(object)
 
-    def log_to_file(self, data):
+    def log_to_file(self, data: str):
         logname = datetime.now().strftime("error_log_%H_%M_%d_%m_%Y.log")
         with open(path.join(_ScriptPath, logname), 'w') as f:
             f.write(data)
+
+    def get_request_log(self, request: requests.Response):
+        logData = "Final page text(url '{}', status {}): \n\n{}\n\nFinal page headers:\n\n{}\n\n".format(
+            request.url, request.status_code, request.text, json.dumps(request.headers.__dict__))
+        logData += "Page history:"
+        for i, hist in enumerate(request.history):
+            logData += "\n\n---Item {}\n\n".format(str(i+1))
+            logData += "Url '{}', status {} with source:\n\n{}\n\nHeaders:\n\n{}".format(
+                hist.url, hist.status_code, hist.text, json.dumps(hist.headers.__dict__))
+        return logData
 
     def convertJSONtoSQLite(self, name: str):
         result = self.searchForChannelName(name)
@@ -242,8 +257,8 @@ class Collector:
             self.print(1,
                        "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 1)\nCheck logs for more info")
             detailed_error = traceback.format_exc()
-            self.log_to_file("Error occured in Position 1, here is detailed traceback:\n\n{}\n\nHere is page content after initial channel name search:\n\n{}".format(
-                detailed_error, searchedPage))
+            self.log_to_file("Error occured in Position 1, here is detailed traceback:\n\n{}\n\nHere is page data for initial channel name search:\n\n{}".format(
+                detailed_error, self.get_request_log(searchedPage)))
             quit()
     #results is a list
 
@@ -292,9 +307,9 @@ class Collector:
         postData["continuation"] = continuationToken
         self.print(3, "Getting next page")
         videoListPage = self.session.post(
-            "https://www.youtube.com/youtubei/v1/browse", headers={}, params=postParametes, data=json.dumps(postData)).text
+            "https://www.youtube.com/youtubei/v1/browse", headers={}, params=postParametes, data=json.dumps(postData))
         try:
-            nextJsonData = json.loads(videoListPage)
+            nextJsonData = json.loads(videoListPage.text)
             nextVideoList = nextJsonData["onResponseReceivedActions"][0][
                 "appendContinuationItemsAction"]["continuationItems"]
         except Exception as e:
@@ -302,8 +317,8 @@ class Collector:
             self.print(1,
                        "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 3.2)\nCheck logs for more info")
             detailed_error = traceback.format_exc()
-            self.log_to_file("Error occured in Position 3.2, here is detailed traceback:\n\n{}\n\nHere is video list page content:\n\n{}".format(
-                detailed_error, videoListPage))
+            self.log_to_file("Error occured in Position 3.2, here is detailed traceback:\n\n{}\n\nHere is video list page log:\n\n{}".format(
+                detailed_error, self.get_request_log(videoListPage)))
             quit()
         self.recursiveVideosExtraction(
             nextVideoList, postData, postParametes, videoData, current+1)
@@ -311,10 +326,10 @@ class Collector:
     #get all video data in formatted form, saves to file at script location
     def getVideos(self, channelID: str):
         initialVideoPage = self.session.get(
-            f"https://www.youtube.com/channel/{channelID}/videos").text
+            f"https://www.youtube.com/channel/{channelID}/videos")
         try:
             initialRequestDataJson = json.loads(
-                '{' + initialVideoPage.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
+                '{' + initialVideoPage.text.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
             self.print(
                 4, f"Initial request json data: \n{json.dumps(initialRequestDataJson)}")
         except Exception as e:
@@ -322,8 +337,8 @@ class Collector:
             self.print(1,
                        "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.1)\nCheck logs for more info")
             detailed_error = traceback.format_exc()
-            self.log_to_file("Error occured in Position 2.1, here is detailed traceback:\n\n{}\n\nHere is the initial get videos page content:\n\n{}".format(
-                detailed_error, initialVideoPage))
+            self.log_to_file("Error occured in Position 2.1, here is detailed traceback:\n\n{}\n\nHere is the initial get videos page log:\n\n{}".format(
+                detailed_error, self.get_request_log(initialVideoPage)))
             quit()
         # Get post data and parameters
         try:
@@ -341,8 +356,8 @@ class Collector:
             self.print(1,
                        "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.2)\nCheck logs for more info")
             detailed_error = traceback.format_exc()
-            self.log_to_file("Error occured in Position 2.2, here is detailed traceback:\n\n{}\n\nHere is the initial get videos page content:\n\n{}".format(
-                detailed_error, initialVideoPage))
+            self.log_to_file("Error occured in Position 2.2, here is detailed traceback:\n\n{}\n\nHere is the initial get videos page log:\n\n{}".format(
+                detailed_error, self.get_request_log(initialVideoPage)))
             quit()
         self.print(2, "Gotten tokens")
 
@@ -351,7 +366,7 @@ class Collector:
 
         # get first page of videos
         try:
-            initialVideoDataJson = json.loads(initialVideoPage.split(
+            initialVideoDataJson = json.loads(initialVideoPage.text.split(
                 'ytInitialData = ')[1].split(';</script>')[0])
             initialVideoList = initialVideoDataJson["contents"][
                 "twoColumnBrowseResultsRenderer"]["tabs"][1][
@@ -365,8 +380,8 @@ class Collector:
             self.print(1,
                        "YouTube might have changed site format. if re-running the script didn't work, contact me to update the code (position 2.3)\nCheck logs for more info")
             detailed_error = traceback.format_exc()
-            self.log_to_file("Error occured in Position 2.3, here is detailed traceback:\n\n{}\n\nHere is the initial get videos page content:\n\n{}".format(
-                detailed_error, initialVideoPage))
+            self.log_to_file("Error occured in Position 2.3, here is detailed traceback:\n\n{}\n\nHere is the initial get videos page log:\n\n{}".format(
+                detailed_error, self.get_request_log(initialVideoPage)))
             quit()
 
         # subsequent base post data
