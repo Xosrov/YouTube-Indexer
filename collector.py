@@ -6,7 +6,7 @@ from datetime import datetime
 from time import sleep
 import argparse
 import sqlite3
-import base64
+from http import HTTPStatus
 import traceback
 
 #validate file names
@@ -50,27 +50,17 @@ class Collector:
         if "PENDING" in consent_cookie:
             try:
                 # consent to youtube
-                page_data_a = json.loads(
-                    '{' + firstVisit.text.split("ytcfg.set({")[1].split("); window.ytcfg.obfuscatedData")[0])
-                page_data_b = json.loads(
-                    '{' + firstVisit.text.split("ytInitialData = {")[1].split(";</script>")[0])
-                # upgrade cookies
-                consent_cookie_data = page_data_b['topbar']['desktopTopbarRenderer']['interstitial'][
-                    'consentBumpV2Renderer']['agreeButton']['buttonRenderer']['command']['saveConsentAction']
-                self.session.cookies.pop('CONSENT')
-                self.session.cookies.update({
-                    'CONSENT': consent_cookie_data['consentCookie'],
-                    'VISITOR_INFO1_LIVE': consent_cookie_data['visitorCookie'],
-                    'PREF': ''
-                })
-                data = {
-                    'visitor_data': base64.b64encode(bytes(page_data_a['DATASYNC_ID'], 'utf-8')).decode('utf-8'),
-                    'session_token': page_data_a['XSRF_TOKEN']
-                }
-                self.session.post(
-                    "https://www.youtube.com/upgrade_visitor_cookie", data=data)
-                # consent
-                self.session.get(consent_cookie_data['consentSaveUrl'])
+                # get consent link (first link in page since choice doesn't matter much)
+                consent_link = firstVisit.text.split('savePreferenceUrl":"')[1].split('"')[0]
+                # convert unicode to plaintext
+                consent_link = consent_link.encode().decode("unicode-escape")
+                resp = self.session.post(consent_link)
+                if resp.status_code != HTTPStatus.NO_CONTENT:
+                    self.print(1,
+                            "Could not consent to YouTube!")
+                    self.log_to_file("Error occured in Position -1, Consent link is {} with status {}\n\nHere is the response: {}\n\n".format(
+                        consent_link, resp.status_code, resp.text))
+                    quit()
             except Exception as e:
                 self.print(1, e)
                 self.print(1,
@@ -276,15 +266,15 @@ class Collector:
                     self.print(
                         3, f"More videos exist, continuation token is {continuationToken}")
                     continue
-                videoID = video["gridVideoRenderer"]["videoId"]
-                title = video["gridVideoRenderer"]["title"]["runs"][0]["text"]
+                videoID = video["richItemRenderer"]["content"]["videoRenderer"]["videoId"]
+                title = video["richItemRenderer"]["content"]["videoRenderer"]["title"]["runs"][0]["text"]
                 try:
-                    views = video["gridVideoRenderer"]["viewCountText"]["simpleText"]
+                    views = video["richItemRenderer"]["content"]["videoRenderer"]["viewCountText"]["simpleText"]
                 except:
                     self.print(3, f"No views in data for {title}, setting NaN")
                     pass
                 try:
-                    length = video["gridVideoRenderer"]["thumbnailOverlays"][0]["thumbnailOverlayTimeStatusRenderer"]["text"]["simpleText"]
+                    length = video["richItemRenderer"]["content"]["videoRenderer"]["thumbnailOverlays"][0]["thumbnailOverlayTimeStatusRenderer"]["text"]["simpleText"]
                 except:
                     self.print(
                         3, f"No video length in data for {title}, setting NaN")
@@ -363,16 +353,13 @@ class Collector:
 
         # final video data list
         finalVideoData = []
-
         # get first page of videos
         try:
             initialVideoDataJson = json.loads(initialVideoPage.text.split(
                 'ytInitialData = ')[1].split(';</script>')[0])
             initialVideoList = initialVideoDataJson["contents"][
                 "twoColumnBrowseResultsRenderer"]["tabs"][1][
-                "tabRenderer"]["content"]["sectionListRenderer"]["contents"][0][
-                "itemSectionRenderer"]["contents"][0][
-                "gridRenderer"]["items"]
+                "tabRenderer"]["content"]["richGridRenderer"]["contents"]
             self.print(
                 4, f"Initial video list:\n{json.dumps(initialVideoList)}")
         except Exception as e:
@@ -521,7 +508,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '-ua', "--user-agent", help="User-Agent to use when connecting to YouTube", default="Mozilla/5.0 (Windows NT 6.1; rv:60.0) Gecko/20100101 Firefox/60.0")
     parser.add_argument(
-        '-v', "--verbosity", help="Set verbosity from 0-3. (0 for silent, default is 1)", type=int, default=1)
+        '-v', "--verbosity", help="Set verbosity from 0-4. (0 for silent, default is 1)", type=int, default=1)
     args = parser.parse_args()
 
     creators = []
